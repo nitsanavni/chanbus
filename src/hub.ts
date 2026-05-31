@@ -37,7 +37,7 @@ export interface Conn {
 }
 
 export interface PersistedState {
-  agents: Record<string, { name: string; cwd?: string; host?: string; lastSeen: number }>;
+  agents: Record<string, { name: string; cwd?: string; host?: string; lastSeen: number; workspace?: string }>;
   mailbox: Record<string, Message[]>;
   history: RoutingEvent[];
 }
@@ -95,6 +95,7 @@ interface AgentRecord {
   name: string;
   state: AgentState;
   lastSeen: number;
+  workspace: string; // isolation partition; "default" when unset
   cwd?: string;
   host?: string;
   conn?: Conn; // present when online
@@ -127,6 +128,7 @@ export class Hub {
         name: rec.name,
         state: "offline",
         lastSeen: rec.lastSeen,
+        workspace: rec.workspace ?? "default",
         cwd: rec.cwd,
         host: rec.host,
       });
@@ -143,6 +145,7 @@ export class Hub {
       agents[id] = {
         name: rec.name,
         lastSeen: rec.lastSeen,
+        workspace: rec.workspace,
         ...(rec.cwd && { cwd: rec.cwd }),
         ...(rec.host && { host: rec.host }),
       };
@@ -237,6 +240,7 @@ export class Hub {
       name: r.name,
       state: r.state,
       lastSeen: r.lastSeen,
+      workspace: r.workspace,
       ...(r.cwd && { cwd: r.cwd }),
       ...(r.host && { host: r.host }),
     }));
@@ -260,8 +264,11 @@ export class Hub {
 
   injectSay(toName: string, text: string): boolean {
     // Human DMs use the same routing as agents: deliver if online, else mailbox.
-    // Unknown/ambiguous target -> false (the HTTP layer turns this into a 404).
-    return this._route("human", "human", toName, text).ok;
+    // The operator plane is GLOBAL: resolve the target across ALL workspaces, then
+    // route within that target's workspace. Unknown target -> false (HTTP -> 404).
+    const target = this._resolveByName(toName) ?? this.agents.get(toName);
+    if (!target) return false;
+    return this._route("human", "human", toName, text, target.workspace).ok;
   }
 
   injectBroadcast(text: string): number {
@@ -307,6 +314,7 @@ export class Hub {
     frame: Extract<ClientFrame, { type: "register" }>
   ): void {
     const { id, name } = frame;
+    const workspace = frame.workspace?.trim() || "default";
     const now = this.now();
 
     // Check if this id was seen before (reconnect)
@@ -339,6 +347,7 @@ export class Hub {
       existing.name = finalName;
       existing.state = "online";
       existing.lastSeen = now;
+      existing.workspace = workspace;
       existing.conn = conn;
       if (frame.meta?.cwd) existing.cwd = String(frame.meta.cwd);
       if (frame.meta?.host) existing.host = String(frame.meta.host);
@@ -363,6 +372,7 @@ export class Hub {
         name: finalName,
         state: "online",
         lastSeen: now,
+        workspace,
         conn,
       };
       if (frame.meta?.cwd) rec.cwd = String(frame.meta.cwd);
@@ -402,9 +412,10 @@ export class Hub {
     fromName: string,
     to: string,
     text: string,
+    workspace: string,
     replyTo?: string
   ): { ok: boolean; to?: string; error?: string } {
-    const target = this._resolveTarget(to);
+    const target = this._resolveTarget(to, workspace);
     if (target === "ambiguous") return { ok: false, error: "ambiguous: use id" };
     if (!target) return { ok: false, error: `no such agent: ${to}` };
 
@@ -445,7 +456,7 @@ export class Hub {
     if (!senderId) return;
     const sender = this.agents.get(senderId)!;
     const { to, text, reqId, replyTo } = frame;
-    const res = this._route(senderId, sender.name, to, text, replyTo);
+    const res = this._route(senderId, sender.name, to, text, sender.workspace, replyTo);
     conn.send({
       type: "sent",
       reqId,
@@ -477,7 +488,12 @@ export class Hub {
 
     let count = 0;
     for (const rec of this.agents.values()) {
-      if (rec.id !== senderId && rec.state === "online" && rec.conn) {
+      if (
+        rec.id !== senderId &&
+        rec.workspace === sender.workspace &&
+        rec.state === "online" &&
+        rec.conn
+      ) {
         rec.conn.send({ type: "message", message: msg });
         count++;
       }
@@ -491,7 +507,13 @@ export class Hub {
     conn: Conn,
     frame: Extract<ClientFrame, { type: "list" }>
   ): void {
-    conn.send({ type: "agents", reqId: frame.reqId, agents: this.roster() });
+    const id = this.connToId.get(conn);
+    const workspace = id ? this.agents.get(id)?.workspace : undefined;
+    const agents =
+      workspace === undefined
+        ? this.roster()
+        : this.roster().filter((a) => a.workspace === workspace);
+    conn.send({ type: "agents", reqId: frame.reqId, agents });
   }
 
   private _handleSetname(
@@ -555,15 +577,15 @@ export class Hub {
     if (rec) rec.lastSeen = this.now();
   }
 
-  private _resolveTarget(to: string): AgentRecord | "ambiguous" | undefined {
-    // 1. Exact id match
+  private _resolveTarget(to: string, workspace: string): AgentRecord | "ambiguous" | undefined {
+    // 1. Exact id match (scoped to workspace — no cross-workspace probing)
     const byId = this.agents.get(to);
-    if (byId) return byId;
+    if (byId && byId.workspace === workspace) return byId;
 
-    // 2. Exact name match
+    // 2. Exact name match within the workspace
     const byName: AgentRecord[] = [];
     for (const rec of this.agents.values()) {
-      if (rec.name === to) byName.push(rec);
+      if (rec.name === to && rec.workspace === workspace) byName.push(rec);
     }
     if (byName.length === 1) return byName[0];
     if (byName.length > 1) return "ambiguous";

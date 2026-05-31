@@ -50,6 +50,7 @@ export interface AgentInfo {
   lastSeen: number; // epoch ms
   cwd?: string;
   host?: string;
+  workspace?: string; // isolation partition; "default" when unset
 }
 
 /** A routed message as it travels and is stored. */
@@ -67,7 +68,7 @@ export interface Message {
 // Every request that expects a reply carries a `reqId` the hub echoes back.
 
 export type ClientFrame =
-  | { type: "register"; id: string; name: string; meta?: Record<string, unknown> }
+  | { type: "register"; id: string; name: string; workspace?: string; meta?: Record<string, unknown> }
   | { type: "send"; to: string; text: string; replyTo?: string; reqId: string }
   | { type: "broadcast"; text: string; reqId: string }
   | { type: "list"; reqId: string }

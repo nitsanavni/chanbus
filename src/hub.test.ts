@@ -973,6 +973,116 @@ describe("serveHub integration", () => {
   });
 });
 
+// ─────────────────────────────── workspaces ───────────────────────────────
+
+describe("workspaces", () => {
+  it("DM by name across workspaces fails with no such agent", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    const cb = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    hub.connect(cb);
+    hub.handle(cb, { type: "register", id: "id2", name: "bob", workspace: "projB" });
+
+    hub.handle(ca, { type: "send", to: "bob", text: "hi", reqId: "r1" });
+    const reply = ca.all("sent")[0] as { ok: boolean; error: string };
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/no such agent/);
+    expect(cb.all("message").length).toBe(0);
+  });
+
+  it("DM by id across workspaces also fails (no cross-workspace probing)", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    const cb = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    hub.connect(cb);
+    hub.handle(cb, { type: "register", id: "id2", name: "bob", workspace: "projB" });
+
+    hub.handle(ca, { type: "send", to: "id2", text: "hi", reqId: "r1" });
+    const reply = ca.all("sent")[0] as { ok: boolean; error: string };
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/no such agent/);
+    expect(cb.all("message").length).toBe(0);
+  });
+
+  it("broadcast reaches only same-workspace agents", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    const ca2 = new FakeConn();
+    const cb = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    hub.connect(ca2);
+    hub.handle(ca2, { type: "register", id: "id2", name: "annie", workspace: "projA" });
+    hub.connect(cb);
+    hub.handle(cb, { type: "register", id: "id3", name: "bob", workspace: "projB" });
+
+    hub.handle(ca, { type: "broadcast", text: "hello A", reqId: "r1" });
+
+    expect(ca2.all("message").length).toBe(1); // same workspace
+    expect(cb.all("message").length).toBe(0); // other workspace
+    expect(ca.all("message").length).toBe(0); // not self
+    const reply = ca.all("sent")[0] as { ok: boolean; count: number };
+    expect(reply.count).toBe(1);
+  });
+
+  it("list returns only the caller's workspace", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    const cb = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    hub.connect(cb);
+    hub.handle(cb, { type: "register", id: "id2", name: "bob", workspace: "projB" });
+
+    hub.handle(ca, { type: "list", reqId: "r1" });
+    const reply = ca.all("agents")[0] as { agents: AgentInfo[] };
+    expect(reply.agents.length).toBe(1);
+    expect(reply.agents[0]!.name).toBe("alice");
+    expect(reply.agents[0]!.workspace).toBe("projA");
+  });
+
+  it("two agents in the same explicit workspace can DM each other", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    const cb = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    hub.connect(cb);
+    hub.handle(cb, { type: "register", id: "id2", name: "bob", workspace: "projA" });
+
+    hub.handle(ca, { type: "send", to: "bob", text: "hi", reqId: "r1" });
+    const reply = ca.all("sent")[0] as { ok: boolean };
+    expect(reply.ok).toBe(true);
+    expect(cb.all("message").length).toBe(1);
+  });
+
+  it("reconnect with a changed workspace updates the record", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice", workspace: "projA" });
+    expect(hub.roster()[0]!.workspace).toBe("projA");
+    hub.disconnect(ca);
+
+    const ca2 = new FakeConn();
+    hub.connect(ca2);
+    hub.handle(ca2, { type: "register", id: "id1", name: "alice", workspace: "projB" });
+    expect(hub.roster()[0]!.workspace).toBe("projB");
+  });
+
+  it("roster carries workspace; missing workspace defaults to 'default'", () => {
+    const { hub } = makeHub();
+    const ca = new FakeConn();
+    hub.connect(ca);
+    hub.handle(ca, { type: "register", id: "id1", name: "alice" });
+    expect(hub.roster()[0]!.workspace).toBe("default");
+  });
+});
+
 // ─────────────────────────────── regression: fix #1 stale connToId ───────────────────────────────
 
 describe("regression: stale connToId on reconnect/sweep (fix #1)", () => {
