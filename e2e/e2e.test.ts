@@ -51,9 +51,19 @@ function hubUrl(): string {
 }
 
 /** Stand up one agent = a Connector + an MCP Client (the "Claude session"). */
-async function spawnAgent(name: string, id: string): Promise<Agent> {
+async function spawnAgent(
+  name: string,
+  id: string,
+  opts?: { workspace?: string }
+): Promise<Agent> {
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-  const connector = new Connector({ id, name, hubUrl: hubUrl(), mcpTransport: serverT });
+  const connector = new Connector({
+    id,
+    name,
+    hubUrl: hubUrl(),
+    mcpTransport: serverT,
+    ...(opts?.workspace ? { workspace: opts.workspace } : {}),
+  });
   const client = new Client({ name: "fake-claude", version: "1.0.0" }, { capabilities: {} });
   const notes: ChannelNote[] = [];
   client.fallbackNotificationHandler = async (n: any) => {
@@ -234,5 +244,60 @@ describe("chanbus end-to-end", () => {
     });
     expect(code).toBe(0);
     expect(out.join("\n")).toContain("alice");
+  });
+
+  // ── workspace isolation (cross-process) ──
+
+  it("agents in different workspaces cannot see each other via list_agents", async () => {
+    const alice = await spawnAgent("alice", "id-alice", { workspace: "projA" });
+    await spawnAgent("bob", "id-bob", { workspace: "projB" });
+    await rosterHas("alice", "online");
+    await rosterHas("bob", "online");
+
+    const { text } = await callTool(alice, "list_agents");
+    expect(text).toContain("alice");
+    expect(text).not.toContain("bob");
+  });
+
+  it("a DM across workspaces fails as 'no such agent' and delivers nothing", async () => {
+    const alice = await spawnAgent("alice", "id-alice", { workspace: "projA" });
+    const bob = await spawnAgent("bob", "id-bob", { workspace: "projB" });
+    await rosterHas("bob", "online");
+
+    const byName = await callTool(alice, "send", { to: "bob", text: "psst" });
+    expect(byName.isError).toBe(true);
+    expect(byName.text.toLowerCase()).toContain("no such agent");
+
+    // even by stable id — the wall blocks probing, not just name lookup
+    const byId = await callTool(alice, "send", { to: "id-bob", text: "psst" });
+    expect(byId.isError).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bob.notes.length).toBe(0);
+  });
+
+  it("broadcast stays within the sender's workspace", async () => {
+    const alice = await spawnAgent("alice", "id-alice", { workspace: "projA" });
+    const ann = await spawnAgent("ann", "id-ann", { workspace: "projA" });
+    const bob = await spawnAgent("bob", "id-bob", { workspace: "projB" });
+    await rosterHas("bob", "online");
+
+    const r = await callTool(alice, "broadcast", { text: "projA standup" });
+    expect(r.text).toContain("1"); // only ann (same workspace), not bob
+
+    await waitFor(() => ann.notes.length > 0);
+    expect(ann.notes[0]!.content).toBe("projA standup");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bob.notes.length).toBe(0);
+  });
+
+  it("agents in the SAME explicit workspace can talk", async () => {
+    const alice = await spawnAgent("alice", "id-alice", { workspace: "shared" });
+    const bob = await spawnAgent("bob", "id-bob", { workspace: "shared" });
+    await rosterHas("bob", "online");
+
+    const r = await callTool(alice, "send", { to: "bob", text: "hi neighbor" });
+    expect(r.isError).toBe(false);
+    await waitFor(() => bob.notes.some((n) => n.content === "hi neighbor"));
   });
 });
