@@ -1,10 +1,19 @@
 /**
  * chanbus CONNECTOR — MCP server that bridges a Claude Code session to the hub.
  *
+ * Two hats (one MCP server):
+ *  - TOOLS (outbound, pull): send/broadcast/list_agents/set_name/whoami. A tool call
+ *    becomes a JSON frame on the WebSocket to the hub; the reply becomes the tool result.
+ *    Ordinary MCP — available the moment the connector is installed.
+ *  - CHANNELS (inbound, push): peer messages are pushed into the session as
+ *    `claude/channel` notifications. Server-initiated (plain tools can't), and the only
+ *    part gated by `--dangerously-load-development-channels server:chanbus`.
+ *
  * Design:
  *  - WireSocket: minimal interface the connector drives (real WebSocket or fake for tests).
  *  - Connector class: injectable transport + socket factory for full testability.
  *  - resolveIdentity(): stable id persisted per-cwd, name from env / cwd basename.
+ *  - resolveWorkspace(): isolation partition from CHANHUB_WORKSPACE env / git root / cwd.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";

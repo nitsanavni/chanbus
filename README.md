@@ -26,6 +26,32 @@ address book that turns a name into the right connector. See `../docs/design.htm
 
 The wire contract for all three lives in `src/protocol.ts` (single source of truth).
 
+## How a session talks to the bus — two hats, two planes
+
+The connector is an ordinary MCP server that wears **two hats**:
+
+- **Tools (outbound, _pull_).** `send` · `broadcast` · `list_agents` · `set_name` ·
+  `whoami`. The session *calls* a tool; the connector turns it into a JSON frame on its
+  **WebSocket** to the hub and returns the reply. Standard MCP — works in any session.
+- **Channels (inbound, _push_).** The connector *pushes* a peer's message into the session
+  as a `<channel>` notification — server-initiated, which plain tools cannot do. This is
+  the newer `claude/channel` capability, and the **only** part gated behind
+  `--dangerously-load-development-channels server:chanbus`.
+
+So a session can **send the moment the connector is installed, but stays deaf until
+launched with the flag** — *talking is tools, hearing is channels.*
+
+Agents reach the hub over that WebSocket (the **agent plane**); each socket is bound to a
+registered identity + workspace at its `register` frame, which is *why* the hub can scope
+routing per agent — it reads "which socket sent this," never a client-supplied field. The
+human `chanbus` CLI is a **separate plane**: plain **HTTP** (`GET /agents`, `POST /say`),
+carrying no agent identity, so the hub serves it the cross-cutting operator view.
+
+| caller | door | sees | needs the flag? |
+|---|---|---|---|
+| **agent** | WebSocket frames, via its connector's tools | only its own workspace | only to *receive* |
+| **operator** (you) | HTTP, via the `chanbus` CLI | every workspace | n/a |
+
 ## Quick start
 
 ```bash
@@ -69,9 +95,12 @@ chanbus launch <name> [--workspace W] [--run]  launch a Claude session wired to 
 
 ## Tools each session gets
 
+The **outbound** half — ordinary MCP tools the session calls (pull):
+
 `send(to, text, replyTo?)` · `broadcast(text)` · `list_agents` · `set_name(name)` · `whoami`
 
-Inbound peer messages arrive as `<channel source="chanbus" from="<name>" from_id="<id>" message_id="…" [broadcast="true"]>…</channel>`.
+The **inbound** half is the channel push (see *two hats* above): peer messages arrive as
+`<channel source="chanbus" from="<name>" from_id="<id>" message_id="…" [broadcast="true"]>…</channel>`.
 
 ## Workspaces — project isolation on one shared hub
 
@@ -122,6 +151,11 @@ context, so the bus is a prompt-injection surface; the design reflects that:
   deliberate.
 - Permission relay (`claude/channel/permission`) and rooms/topics are not implemented
   (design phase 4).
+- **The operator HTTP plane crosses workspaces.** Workspace isolation is enforced on the
+  *agent plane* (a session's own MCP tools, scoped by its socket). The human HTTP plane is
+  identity-less and sees every workspace — so an agent that shells out to the `chanbus` CLI
+  (or curls `:4900`) can peek past the wall. The wall stops *accidental* cross-talk between
+  agents using their normal tools; it is not a sandbox.
 
 ## Testing
 

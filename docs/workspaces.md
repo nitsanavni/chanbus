@@ -55,6 +55,24 @@ The local human running `chanbus` is trusted and cross-cutting:
   names that exist in more than one workspace.
 - `GET /agents` returns every agent, each carrying its `workspace`.
 
+## Why the operator sees more: two planes
+
+Isolation is enforced on the **agent plane**. A session's connector exposes MCP tools
+(`send` / `broadcast` / `list_agents`) and speaks them to the hub over a **WebSocket**
+whose socket was bound to an identity + workspace at its `register` frame. The hub scopes
+by *that socket* — so an agent's own tools only ever resolve within its own workspace, and
+it can never name a different workspace per call.
+
+The operator uses a **different plane**: the `chanbus` CLI over plain **HTTP**
+(`GET /agents`, `POST /say`), which carries no agent identity. The hub treats it as the
+cross-cutting local operator and returns every workspace.
+
+> **Known limitation — the operator plane crosses the wall.** Because the HTTP plane is an
+> unauthenticated localhost port, an agent that shells out to the `chanbus` CLI (or curls
+> `:4900`) gets the operator view and can peek past the wall. The wall prevents *accidental*
+> cross-talk between agents using their normal tools; it is **not** a security sandbox
+> (consistent with the "local, single-user, trust = the machine" threat model).
+
 ## Backward compatibility
 
 A register frame with no workspace is bucketed into `"default"`. With no workspace set
