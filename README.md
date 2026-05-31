@@ -57,14 +57,14 @@ Then tell alice *"send bob: what are you working on?"* — bob's idle session wa
 chanbus up [--port N] [--host H]   start the hub (foreground, logs routing)
 chanbus down [--port N]            stop the hub
 chanbus status [--port N]          is it up? how many agents?
-chanbus ls [--port N]              roster: name, state, last-seen, cwd
+chanbus ls [--workspace X] [--port N]  roster: name, state, last-seen, workspace, cwd
 chanbus log [--port N]             recent routed messages
 chanbus tail [agent] [--port N]    live SSE stream of routing (optionally one agent)
 chanbus say <to> <text...>         inject a DM as "human" (mailboxed if target offline)
 chanbus bcast <text...>            broadcast as "human"
 chanbus kick <name>                force-disconnect an agent
 chanbus install [--run]            register the connector as a user-scope MCP server
-chanbus launch <name> [--run]      launch a Claude session wired to the bus
+chanbus launch <name> [--workspace W] [--run]  launch a Claude session wired to the bus
 ```
 
 ## Tools each session gets
@@ -72,6 +72,32 @@ chanbus launch <name> [--run]      launch a Claude session wired to the bus
 `send(to, text, replyTo?)` · `broadcast(text)` · `list_agents` · `set_name(name)` · `whoami`
 
 Inbound peer messages arrive as `<channel source="chanbus" from="<name>" from_id="<id>" message_id="…" [broadcast="true"]>…</channel>`.
+
+## Workspaces — project isolation on one shared hub
+
+The connector is installed **user-scope**, so every session auto-joins the single hub.
+To keep unrelated projects from cross-talking, every agent belongs to exactly one
+**workspace**, and the hub scopes *all* routing to it — DMs, broadcasts, and
+`list_agents`. Agents in different workspaces cannot see, address, or even discover each
+other (a cross-workspace DM fails identically to a nonexistent agent — by id *or* name).
+
+A session's workspace is resolved once, in priority order:
+
+1. `CHANHUB_WORKSPACE` env — explicit (e.g. a shared `standup` across projects).
+2. **Nearest git root** above `cwd` — the natural "this project" key (the default).
+3. `cwd` — when not in a git repo.
+
+So two sessions opened anywhere inside project A share workspace A automatically; project
+B's share B. There is **no implicit global channel** — to share across projects, agents
+opt in by setting the same `CHANHUB_WORKSPACE`. The human operator (`chanbus ls`,
+`say`, `bcast`) is cross-cutting and sees every workspace; `chanbus ls --workspace X`
+filters. Full design: [`docs/workspaces.md`](docs/workspaces.md).
+
+> **Receiving is still a per-session opt-in.** Workspaces don't change the fact that a
+> session only *receives* `<channel>` messages when started with
+> `--dangerously-load-development-channels server:chanbus`. Claude Code provides no
+> settings/env bypass — it's an intentional injection-surface guard, surfaced here via
+> `chanbus install`/`--help` rather than a shell alias.
 
 ## Security model
 
@@ -100,7 +126,7 @@ context, so the bus is a prompt-injection surface; the design reflects that:
 ## Testing
 
 ```bash
-bun test                       # 127 unit + integration + cross-component E2E tests
+bun test                       # 151 unit + integration + cross-component E2E tests
 bun scripts/manual-e2e.ts      # full-process manual E2E: real hub + real connector
                                # subprocesses over real WebSockets + real CLI (16 scenarios)
 ```
