@@ -8,7 +8,7 @@
 
 import { DEFAULT_HOST, DEFAULT_PORT, HTTP, type AgentInfo, type RoutingEvent } from "./protocol.ts";
 import { serveHub, MemoryStore } from "./hub.ts";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
 // ─────────────────────────────── pure helpers ───────────────────────────────
@@ -85,11 +85,16 @@ export function formatAgents(agents: AgentInfo[], now: number): string {
 
   if (sorted.length === 0) return "(no agents)";
 
-  const header = ["NAME", "STATE", "LAST-SEEN", "CWD"];
+  const home = process.env.HOME;
+  const collapseHome = (s: string): string =>
+    home && s.startsWith(home) ? "~" + s.slice(home.length) : s;
+
+  const header = ["NAME", "STATE", "LAST-SEEN", "WORKSPACE", "CWD"];
   const rows = sorted.map((a) => [
     a.name,
     a.state,
     relativeTime(a.lastSeen, now),
+    collapseHome(a.workspace ?? "default"),
     a.cwd ?? "",
   ]);
 
@@ -121,13 +126,16 @@ export function buildInstallCommand(projectDir: string): string[] {
 
 export function buildLaunchCommand(
   name: string,
-  opts: { id: string; hubUrl: string }
+  opts: { id: string; hubUrl: string; workspace?: string }
 ): { env: Record<string, string>; argv: string[] } {
   const env: Record<string, string> = {
     CHANHUB_NAME: name,
     CHANHUB_ID: opts.id,
     CHANHUB_URL: opts.hubUrl,
   };
+  if (opts.workspace) {
+    env.CHANHUB_WORKSPACE = opts.workspace;
+  }
   const argv = ["claude", "--dangerously-load-development-channels", "server:chanbus"];
   return { env, argv };
 }
@@ -255,7 +263,14 @@ export async function run(
           err(`error: ${res.status}`);
           return 1;
         }
-        const agents = (await res.json()) as AgentInfo[];
+        let agents = (await res.json()) as AgentInfo[];
+        const wsFilter = flags["workspace"];
+        if (typeof wsFilter === "string") {
+          agents = agents.filter((a) => {
+            const ws = a.workspace ?? "default";
+            return ws === wsFilter || basename(ws) === wsFilter;
+          });
+        }
         out(formatAgents(agents, Date.now()));
         return 0;
       } catch {
@@ -407,11 +422,15 @@ export async function run(
     }
 
     case "install": {
-      const projectDir = new URL(import.meta.dir).pathname;
       // import.meta.dir points to src/, go up one level to project root
-      const absDir = join(projectDir, "..");
+      const absDir = join(import.meta.dir, "..");
       const cmdArr = buildInstallCommand(absDir);
       out(cmdArr.join(" "));
+      out("");
+      out("This makes every Claude session send-capable with an auto identity.");
+      out("To RECEIVE messages, start claude with:");
+      out("  claude --dangerously-load-development-channels server:chanbus");
+      out("Each session's workspace defaults to its git root; override with CHANHUB_WORKSPACE=<name>.");
       if (flags["run"] === true) {
         const proc = Bun.spawn(cmdArr, { stdio: ["inherit", "inherit", "inherit"] });
         await proc.exited;
@@ -429,7 +448,8 @@ export async function run(
       const portMatch = baseUrl.match(/:(\d+)$/);
       const port = portMatch ? portMatch[1] : String(DEFAULT_PORT);
       const hubUrl = `ws://${DEFAULT_HOST}:${port}/ws`;
-      const { env: launchEnv, argv: launchArgv } = buildLaunchCommand(name, { id, hubUrl });
+      const workspace = typeof flags["workspace"] === "string" ? flags["workspace"] : undefined;
+      const { env: launchEnv, argv: launchArgv } = buildLaunchCommand(name, { id, hubUrl, workspace });
       const envStr = Object.entries(launchEnv)
         .map(([k, v]) => `${k}=${v}`)
         .join(" ");
@@ -455,17 +475,24 @@ export async function run(
         "  up [--port N] [--host H]       Start hub in-process; stream events",
         "  down [--port N]                Stop hub (POST /shutdown)",
         "  status [--port N]              Show hub/agent status",
-        "  ls [--port N]                  List agents (table: NAME STATE LAST-SEEN CWD)",
+        "  ls [--workspace X] [--port N]  List agents (table: NAME STATE LAST-SEEN WORKSPACE CWD); --workspace X filters",
         "  log [--port N]                 Print recent routed messages",
         "  tail [agent] [--port N]        Stream live events via SSE",
         "  say <to> <text...> [--port N]  DM an agent",
         "  bcast <text...> [--port N]     Broadcast to all agents",
         "  kick <name> [--port N]         Force-disconnect an agent",
         "  install [--run]                Print (or exec) claude mcp add command",
-        "  launch <name> [--port N] [--run]  Print (or exec) claude launch command",
+        "  launch <name> [--workspace W] [--port N] [--run]  Print (or exec) claude launch command",
         "  help                           Show this usage",
         "",
         "Env: CHANBUS_PORT — default port (overridden by --port)",
+        "",
+        "Workspaces: agents are isolated by workspace; only same-workspace agents see each other.",
+        "  The default workspace is the session's git root; override with CHANHUB_WORKSPACE=<name>.",
+        "",
+        "Inbound: a session only RECEIVES messages if started with",
+        "  claude --dangerously-load-development-channels server:chanbus",
+        "  (no config/env bypass — by design). See docs/workspaces.md.",
       ].join("\n"));
       return 0;
     }

@@ -161,6 +161,31 @@ describe("formatAgents", () => {
     const out = formatAgents(agents, now);
     expect(out).toContain("/home/user");
   });
+
+  test("includes WORKSPACE column with value", () => {
+    const agents: AgentInfo[] = [
+      { id: "1", name: "alice", state: "online", lastSeen: now, workspace: "default" },
+    ];
+    const out = formatAgents(agents, now);
+    expect(out).toContain("WORKSPACE");
+    expect(out).toContain("default");
+  });
+
+  test("collapses $HOME to ~ in workspace", () => {
+    const prevHome = process.env.HOME;
+    process.env.HOME = "/home/me";
+    try {
+      const agents: AgentInfo[] = [
+        { id: "1", name: "alice", state: "online", lastSeen: now, workspace: "/home/me/code/proj" },
+      ];
+      const out = formatAgents(agents, now);
+      expect(out).toContain("~/code/proj");
+      expect(out).not.toContain("/home/me/code/proj");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
 });
 
 describe("buildInstallCommand", () => {
@@ -207,9 +232,99 @@ describe("buildLaunchCommand", () => {
     expect(argv[0]).toBe("claude");
     expect(argv).toContain("server:chanbus");
   });
+
+  test("workspace opt sets CHANHUB_WORKSPACE", () => {
+    const { env } = buildLaunchCommand("myagent", {
+      id: "x",
+      hubUrl: "ws://127.0.0.1:4900/ws",
+      workspace: "projA",
+    });
+    expect(env.CHANHUB_WORKSPACE).toBe("projA");
+  });
+
+  test("no workspace opt → no CHANHUB_WORKSPACE in env", () => {
+    const { env } = buildLaunchCommand("myagent", {
+      id: "x",
+      hubUrl: "ws://127.0.0.1:4900/ws",
+    });
+    expect(env.CHANHUB_WORKSPACE).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────── workspace / help / install ───────────────────────────────
+
+describe("ls --workspace filter", () => {
+  function stubFetch(agents: AgentInfo[]): typeof fetch {
+    return (async () =>
+      new Response(JSON.stringify(agents), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+  }
+
+  const now = Date.now();
+  const agents: AgentInfo[] = [
+    { id: "1", name: "alice", state: "online", lastSeen: now, workspace: "/home/u/projA" },
+    { id: "2", name: "bob", state: "online", lastSeen: now, workspace: "/home/u/projB" },
+  ];
+
+  test("filters to matching workspace basename", async () => {
+    const out = captureLines();
+    const code = await run(["ls", "--workspace", "projA"], {
+      out: out.writer,
+      fetchImpl: stubFetch(agents),
+      env: {},
+    });
+    expect(code).toBe(0);
+    const text = out.lines.join("\n");
+    expect(text).toContain("alice");
+    expect(text).not.toContain("bob");
+  });
+
+  test("filters to exact workspace string", async () => {
+    const out = captureLines();
+    const code = await run(["ls", "--workspace", "/home/u/projB"], {
+      out: out.writer,
+      fetchImpl: stubFetch(agents),
+      env: {},
+    });
+    expect(code).toBe(0);
+    const text = out.lines.join("\n");
+    expect(text).toContain("bob");
+    expect(text).not.toContain("alice");
+  });
+});
+
+describe("help text", () => {
+  test("mentions inbound flag and workspace env", async () => {
+    const out = captureLines();
+    const code = await run(["help"], { out: out.writer, env: {} });
+    expect(code).toBe(0);
+    const text = out.lines.join("\n");
+    expect(text).toContain("Inbound:");
+    expect(text).toContain("--dangerously-load-development-channels");
+    expect(text).toContain("Workspaces");
+    expect(text).toContain("CHANHUB_WORKSPACE");
+  });
+});
+
+describe("install hint", () => {
+  test("prints inbound-flag hint", async () => {
+    const out = captureLines();
+    const code = await run(["install"], { out: out.writer, env: {} });
+    expect(code).toBe(0);
+    const text = out.lines.join("\n");
+    expect(text).toContain("--dangerously-load-development-channels");
+    expect(text).toContain("CHANHUB_WORKSPACE");
+  });
 });
 
 // ─────────────────────────────── integration tests ───────────────────────────────
+
+function captureLines(): { lines: string[]; writer: (s: string) => void } {
+  const lines: string[] = [];
+  return { lines, writer: (s: string) => lines.push(s) };
+}
 
 function capture(): { lines: string[]; writer: (s: string) => void } {
   const lines: string[] = [];
