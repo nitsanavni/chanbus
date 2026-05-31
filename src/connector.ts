@@ -30,7 +30,7 @@ import type {
   AgentInfo,
 } from "./protocol.js";
 
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -104,6 +104,33 @@ export function resolveIdentity(): { id: string; name: string } {
   }
 }
 
+// ─────────────────────────────── resolveWorkspace ────────────────────────────
+
+/**
+ * Resolve the workspace partition for this session.
+ *
+ *   a. CHANHUB_WORKSPACE env (trimmed) if set and non-empty.
+ *   b. Nearest git root at or above cwd — the first ancestor directory
+ *      containing a `.git` entry; returns its absolute path.
+ *   c. Fallback: the cwd itself.
+ *
+ * Pure/testable via the optional `cwd` arg (defaults to process.cwd()).
+ */
+export function resolveWorkspace(cwd: string = process.cwd()): string {
+  const env = process.env.CHANHUB_WORKSPACE?.trim();
+  if (env) return env;
+
+  let dir = cwd;
+  // Walk up until we find a .git or hit the filesystem root.
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return cwd;
+}
+
 // ─────────────────────────────── Connector class ─────────────────────────────
 
 type PendingEntry = {
@@ -126,13 +153,16 @@ Tools available:
 - broadcast(text): Send a message to all connected agents.
 - list_agents: List all agents currently on the hub.
 - set_name(name): Change your display name on the hub.
-- whoami: Show your current identity (id + name).
+- whoami: Show your current identity (id + name + workspace).
+
+You only see peers in the same workspace.
 `;
 
 export interface ConnectorOpts {
   id?: string;
   name?: string;
   hubUrl?: string;
+  workspace?: string;
   meta?: Record<string, unknown>;
   mcpTransport?: Transport;
   wsFactory?: (url: string) => WireSocket;
@@ -146,6 +176,7 @@ export interface ConnectorOpts {
 export class Connector {
   private _id: string;
   private _name: string;
+  private readonly _workspace: string;
   private readonly _hubUrl: string;
   private readonly _meta: Record<string, unknown>;
   private readonly _mcpTransport: Transport;
@@ -167,6 +198,7 @@ export class Connector {
     const identity = resolveIdentity();
     this._id = opts.id ?? identity.id;
     this._name = opts.name ?? identity.name;
+    this._workspace = opts.workspace ?? resolveWorkspace();
     this._meta = opts.meta ?? {};
     this._requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this._scheduler = opts.scheduler ?? ((fn, ms) => setTimeout(fn, ms));
@@ -200,8 +232,8 @@ export class Connector {
     };
   }
 
-  whoami(): { id: string; name: string } {
-    return { id: this._id, name: this._name };
+  whoami(): { id: string; name: string; workspace: string } {
+    return { id: this._id, name: this._name, workspace: this._workspace };
   }
 
   async start(): Promise<void> {
@@ -239,6 +271,7 @@ export class Connector {
         type: "register",
         id: this._id,
         name: this._name,
+        workspace: this._workspace,
         meta: this._meta,
       };
       ws.send(JSON.stringify(frame));
@@ -410,7 +443,7 @@ export class Connector {
         },
         {
           name: "whoami",
-          description: "Show your current identity (id + name).",
+          description: "Show your current identity (id + name + workspace).",
           inputSchema: {
             type: "object" as const,
             properties: {},
@@ -426,7 +459,7 @@ export class Connector {
       if (name === "whoami") {
         return {
           content: [
-            { type: "text" as const, text: `id: ${this._id}\nname: ${this._name}` },
+            { type: "text" as const, text: `id: ${this._id}\nname: ${this._name}\nworkspace: ${this._workspace}` },
           ],
         };
       }

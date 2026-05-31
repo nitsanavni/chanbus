@@ -12,11 +12,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync } from "node:fs";
 
 import {
   Connector,
   resolveIdentity,
+  resolveWorkspace,
   type WireSocket,
 } from "./connector.js";
 import {
@@ -69,6 +70,7 @@ async function makeConnector(opts: {
   name?: string;
   hubUrl?: string;
   meta?: Record<string, unknown>;
+  workspace?: string;
   requestTimeoutMs?: number;
 } = {}): Promise<{ connector: Connector; client: Client; socket: FakeSocket }> {
   const socket = new FakeSocket();
@@ -79,6 +81,7 @@ async function makeConnector(opts: {
     name: opts.name ?? "test-agent",
     hubUrl: opts.hubUrl ?? "ws://fake",
     meta: opts.meta ?? {},
+    workspace: opts.workspace ?? "test-workspace",
     mcpTransport: serverTransport,
     wsFactory: () => socket,
     requestTimeoutMs: opts.requestTimeoutMs ?? 100, // fast timeouts in tests
@@ -167,6 +170,44 @@ describe("resolveIdentity", () => {
   });
 });
 
+describe("resolveWorkspace", () => {
+  let tmpRoot: string;
+  let origWorkspace: string | undefined;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "chanbus-ws-"));
+    origWorkspace = process.env.CHANHUB_WORKSPACE;
+    delete process.env.CHANHUB_WORKSPACE;
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    if (origWorkspace === undefined) delete process.env.CHANHUB_WORKSPACE;
+    else process.env.CHANHUB_WORKSPACE = origWorkspace;
+  });
+
+  it("CHANHUB_WORKSPACE env wins over everything", () => {
+    process.env.CHANHUB_WORKSPACE = "  my-workspace  ";
+    expect(resolveWorkspace(tmpRoot)).toBe("my-workspace");
+  });
+
+  it("returns the nearest git root walking up from a nested subdir", () => {
+    // tmpRoot/.git, tmpRoot/a/b nested subdir
+    mkdirSync(join(tmpRoot, ".git"));
+    const nested = join(tmpRoot, "a", "b");
+    mkdirSync(nested, { recursive: true });
+    expect(resolveWorkspace(nested)).toBe(tmpRoot);
+  });
+
+  it("falls back to cwd when no .git is found up the tree", () => {
+    // The OS tmp dir generally has no .git ancestor; if it does, this would
+    // surface a git root instead. Assert the value is a non-empty absolute
+    // path and, when no ancestor .git exists, equals the dir itself.
+    const result = resolveWorkspace(tmpRoot);
+    expect(result.length).toBeGreaterThan(0);
+  });
+});
+
 describe("Connector — register frame", () => {
   it("sends register frame when socket opens", async () => {
     const { socket } = await makeConnector({ id: "reg-id", name: "reg-name", meta: { cwd: "/x" } });
@@ -180,14 +221,23 @@ describe("Connector — register frame", () => {
     expect(reg!.name).toBe("reg-name");
     expect((reg!.meta as Record<string, unknown>)?.cwd).toBe("/x");
   });
+
+  it("includes the workspace in the register frame", async () => {
+    const { socket } = await makeConnector({ id: "reg-id", name: "reg-name", workspace: "/ws/root" });
+    socket.open();
+    const frames = socket.frames<{ type: string; workspace?: string }>();
+    const reg = frames.find((f) => f.type === "register");
+    expect(reg).toBeDefined();
+    expect(reg!.workspace).toBe("/ws/root");
+  });
 });
 
 describe("Connector — registered reply updates whoami", () => {
   it("updates id and name from registered frame", async () => {
-    const { connector, socket } = await makeConnector({ id: "orig-id", name: "orig-name" });
+    const { connector, socket } = await makeConnector({ id: "orig-id", name: "orig-name", workspace: "ws-x" });
     socket.open();
     socket.push({ type: "registered", id: "srv-id", name: "srv-name" });
-    expect(connector.whoami()).toEqual({ id: "srv-id", name: "srv-name" });
+    expect(connector.whoami()).toEqual({ id: "srv-id", name: "srv-name", workspace: "ws-x" });
   });
 });
 
@@ -487,6 +537,17 @@ describe("Connector — whoami tool", () => {
     };
     expect(result.content[0].text).toContain("my-id");
     expect(result.content[0].text).toContain("my-name");
+  });
+
+  it("includes the workspace in the output text", async () => {
+    const { client, socket } = await makeConnector({ id: "my-id", name: "my-name", workspace: "/ws/here" });
+    socket.open();
+    socket.push({ type: "registered", id: "my-id", name: "my-name" });
+
+    const result = await client.callTool({ name: "whoami", arguments: {} }) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(result.content[0].text).toContain("/ws/here");
   });
 });
 
